@@ -4,12 +4,12 @@ FROM python
 # Set a workdir (optional, but nice to have)
 WORKDIR /app
 
-# Copy our code
-COPY a1.c .
-
 # Copy tester and its data
 COPY tester.py .
 COPY a1_data.json .
+
+# Copy our code
+COPY a1.c .
 
 # Run tester
 CMD [ "python3", "./tester.py" ]

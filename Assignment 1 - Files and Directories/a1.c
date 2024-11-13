@@ -5,9 +5,42 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <inttypes.h>
+#include <unistd.h>
+#include <fcntl.h>
 
-// 01000 is outside of the 0000 - 0777 range for file permissions
-# define OS_A1_INVALID_PERMISSIONS 01000
+
+#define OS_ASSIG_1_VALID_SF 1
+#define OS_ASSIG_1_WRONG_MAGIC 2
+#define OS_ASSIG_1_WRONG_VERSION 3
+#define OS_ASSIG_1_WRONG_NUMBER_OF_SECTIONS 4
+#define OS_ASSIG_1_WRONG_SECTION_TYPE 5
+
+
+#define OS_ASSIG_1_MAGIC_SIZE 4
+#define OS_ASSIG_1_SECTION_NAME_SIZE 15
+struct sf_section_header {
+    char name[OS_ASSIG_1_SECTION_NAME_SIZE + 1];
+    uint8_t type;
+    uint32_t offset;
+    uint32_t size;
+};
+
+struct sf_file_header {
+    char magic[OS_ASSIG_1_MAGIC_SIZE + 1];
+    uint16_t header_size;
+    uint32_t version;
+    uint8_t number_of_sections;
+    struct sf_section_header sections[255];
+    // We could also use a pointer, then allocate via malloc().
+    // But since that would require usage of free() and section
+    // headers are small, and there can be at most 255 sections
+    // (maximum value for a uint8_t), and we're unlikely to have
+    // more than one header at a time (never, in the current form
+    // of this assignment), and 255 x 28 = 7140 bytes (~7 kB), I
+    // chose this instead.
+};
+
 struct directory_list_filter_options {
     char* name_ends_with;
     char* permissions_rwx;
@@ -183,6 +216,97 @@ void print_directory_contents(char* path, bool recursive, struct directory_list_
     closedir(current_directory);
 }
 
+/**
+ * Attempts to extract the file header data from a file.
+ * No validation is performed; the returned result should be
+ * validated separately to make sure a correct SF file was scanned.
+ *
+ * If the file is too short to read a complete header from, this
+ * function will fill in as much data as available, and the rest will
+ * be returned initialized to 0 (for numerical fields) or "" (for
+ * string fields).
+ *
+ * @param file_descriptor a valid file descriptor, as returned by open()
+ * @return an sf_file_header structure containing the header data
+ */
+struct sf_file_header extract_file_header(int file_descriptor) {
+    const off_t initial_offset = lseek(file_descriptor, 0, SEEK_CUR); // Save current offset to restore when done
+    
+    struct sf_file_header header; // Structs are 0-initialized by default
+    
+    // Simply read assuming that the bytes exist and can be read
+    // If read() fails for any reason, or returns less bytes than
+    // needed (e.g. because of end-of-file), then the function will
+    // simply deliver an incomplete result as announced, and the
+    // validating function will detect this issue
+    //
+    // It's probably workable to do a single read() simply scooping
+    // up the entire start of the file into header, but that's both
+    // quite untransparent and does not account for struct padding,
+    // so I've chosen to read the fields one by one.
+    lseek(file_descriptor, 0, SEEK_SET);
+    read(file_descriptor, &(header.magic), OS_ASSIG_1_MAGIC_SIZE);
+    header.magic[OS_ASSIG_1_MAGIC_SIZE] = '\0'; // Add terminator, since read() does not
+    read(file_descriptor, &(header.header_size), sizeof(header.header_size));
+    read(file_descriptor, &(header.version), sizeof(header.version));
+    read(file_descriptor, &(header.number_of_sections), sizeof(header.number_of_sections));
+    if (header.number_of_sections > 0) {
+        for (int i = 0; i < header.number_of_sections; ++i) {
+            read(file_descriptor, &(header.sections[i].name), OS_ASSIG_1_SECTION_NAME_SIZE);
+            header.sections[i].name[OS_ASSIG_1_SECTION_NAME_SIZE] = '\0'; // Add terminator since read() does not
+            read(file_descriptor, &(header.sections[i].type), sizeof(header.sections[i].type));
+            read(file_descriptor, &(header.sections[i].offset), sizeof(header.sections[i].offset));
+            read(file_descriptor, &(header.sections[i].size), sizeof(header.sections[i].size));
+        }
+    }
+    
+    lseek(file_descriptor, initial_offset, SEEK_SET); // Set file descriptor back to initial position
+    return header;
+}
+
+/**
+ * Validates a given SF file using its header.
+ * Returns one of the following codes, depending on the result:
+ * - OS_ASSIG_1_VALID_SF if file is valid
+ * - OS_ASSIG_1_WRONG_MAGIC if magic is invalid
+ * - OS_ASSIG_1_WRONG_VERSION is version is invalid
+ * - OS_ASSIG_1_WRONG_NUMBER_OF_SECTIONS if number of sections is invalid
+ * - OS_ASSIG_1_WRONG_SECTION_TYPE if a section has an invalid type
+ *
+ * @param header an sf_file_header structure, as returned by extract_file_header()
+ * @return a code as specified above
+ */
+int validate_sf_file(struct sf_file_header header) {
+    if (0 != strcmp("9Q6d", header.magic)) return OS_ASSIG_1_WRONG_MAGIC;
+    if (header.version < 107 || header.version > 144) return OS_ASSIG_1_WRONG_VERSION;
+    if (header.number_of_sections != 2 &&
+        (header.number_of_sections < 5 || header.number_of_sections > 17)) return OS_ASSIG_1_WRONG_NUMBER_OF_SECTIONS;
+    
+    for (int i = 0; i < header.number_of_sections; ++i) {
+        if(header.sections[i].type != 33 &&
+           header.sections[i].type != 28 &&
+           header.sections[i].type != 38 &&
+           header.sections[i].type != 54) return OS_ASSIG_1_WRONG_SECTION_TYPE;
+    }
+    
+    return OS_ASSIG_1_VALID_SF;
+}
+
+/**
+ * Prints an sf_file_header structure using the
+ * format required in the assignment.
+ * @param header the sf_file_header to be printed
+ */
+
+void print_sf_file_header(struct sf_file_header header) {
+    printf("version=%" PRIu32 "\n", header.version);
+    printf("nr_sections=%" PRIu8 "\n", header.number_of_sections);
+    for (int i = 0; i < header.number_of_sections; ++i) {
+        printf("section%d: %s", i+1, header.sections[i].name);
+        printf(" %" PRIu8 " %" PRIu32 "\n", header.sections[i].type, header.sections[i].size);
+    }        
+}
+
 int main(int argc, char* argv[]) {
     
     if (received_option(argc, argv, "variant")) {
@@ -207,6 +331,40 @@ int main(int argc, char* argv[]) {
         else {
             printf("ERROR\n");
             printf("invalid directory path");
+        }
+    }
+    else if (received_option(argc, argv, "parse")) {
+        char* path = get_parameter_value(argc, argv, "path");
+        
+        int file_descriptor = open(path, O_RDONLY);
+        if (-1 == file_descriptor) {
+            printf("ERROR\n");
+            printf("invalid file path");
+        }
+        else {
+            struct sf_file_header header = extract_file_header(file_descriptor);
+            int validity_status = validate_sf_file(header);
+            if (OS_ASSIG_1_VALID_SF == validity_status) {
+                printf("SUCCESS\n");
+                print_sf_file_header(header);
+            }
+            else {
+                printf("ERROR\n");
+                switch (validity_status) {
+                    case OS_ASSIG_1_WRONG_MAGIC:
+                        printf("wrong magic");
+                        break;
+                    case OS_ASSIG_1_WRONG_VERSION:
+                        printf("wrong version");
+                        break;
+                    case OS_ASSIG_1_WRONG_NUMBER_OF_SECTIONS:
+                        printf("wrong sect_nr");
+                        break;
+                    case OS_ASSIG_1_WRONG_SECTION_TYPE:
+                        printf("wrong sect_types");
+                        break;
+                }
+            }
         }
     }
     else {
