@@ -10,6 +10,8 @@
 #include <fcntl.h>
 
 
+#define OS_ASSIG_1_LINE_SEPARATOR 0x0a
+
 #define OS_ASSIG_1_VALID_SF 1
 #define OS_ASSIG_1_WRONG_MAGIC 2
 #define OS_ASSIG_1_WRONG_VERSION 3
@@ -41,9 +43,26 @@ struct sf_file_header {
     // chose this instead.
 };
 
+struct minimum_K_sections_with_exactly_L_lines {
+    unsigned int sections;
+    unsigned int lines;
+};
+
 struct directory_list_filter_options {
     char* name_ends_with;
     char* permissions_rwx;
+    struct minimum_K_sections_with_exactly_L_lines min_sections_with_exact_lines;
+};
+
+// Object you can use to initialize directory_list_filter_options entities
+// so that they have no filters enabled at start.
+const struct directory_list_filter_options NO_FILTERS = {
+    .name_ends_with = NULL,
+    .permissions_rwx = NULL,
+    .min_sections_with_exact_lines = {
+        .sections = 0,
+        .lines = 0
+    }
 };
 
 /**
@@ -163,60 +182,6 @@ bool string_ends_with(char* string_to_test, char* ending) {
 }
 
 /**
- * Prints the full name (file name + path until there, for example
- * "test_root/test_dir/test_file.txt") of all elements in the target
- * directory. If the recursive flag is true, recursively prints any
- * elements in sub-directories encountered as well.
- *
- * Additional filtering options are available through the filter_options
- * argument:
- * - if filter_options.name_ends_with is not NULL, will only display
- *   elements whose filename ends with the given sequence
- * - if filter_options.permissions_mask is not NULL, will only display
- *   elemenets whose permissions (as given by stat()) match the given ones
- * Note that if the recursive flag is true, the function will recurse into
- * sub-directories even if they do not match the filter criteria (and hence
- * are not printed).
- */
-void print_directory_contents(char* path, bool recursive, struct directory_list_filter_options filter_options) {
-    DIR* current_directory = opendir(path);
-    
-    struct dirent* entry;
-    for (entry = readdir(current_directory); NULL != entry; entry = readdir(current_directory)) {
-        // Skip 'this directory' and 'parent directory' entries
-        if (0 == strcmp(entry->d_name, ".") || 0 == strcmp(entry->d_name, "..")) continue;
-        
-        // Generate full name for entry, including path so far
-        size_t full_name_size = strlen(path) + 1 + strlen(entry->d_name) + 1; // +1 for '/' and for '\0'
-        char* entry_full_name = (char*)malloc(full_name_size);
-        // char entry_full_name[256]; // would've worked on most systems too
-        sprintf(entry_full_name, "%s/%s", path, entry->d_name);
-        
-        // Call stat() to get entry info for recursion / filtering
-        struct stat entry_stat_buffer;
-        stat(entry_full_name, &entry_stat_buffer); // TODO: unspecified what to do if stat() returns an error
-        
-        // Extracting the conditions misses out on if shortcutting (unless optimizer kicks in),
-        // but I like the added readability.
-        bool name_ending_matches = NULL == filter_options.name_ends_with
-                                || string_ends_with(entry->d_name, filter_options.name_ends_with);
-        bool permissions_match = NULL == filter_options.permissions_rwx
-                              || test_permissions_match(&entry_stat_buffer, filter_options.permissions_rwx);
-        if(name_ending_matches && permissions_match) {
-            printf("%s\n", entry_full_name);
-        }
-        
-        if (recursive && S_ISDIR(entry_stat_buffer.st_mode)) {
-            print_directory_contents(entry_full_name, recursive, filter_options);
-        }
-        
-        free(entry_full_name);
-    }
-    
-    closedir(current_directory);
-}
-
-/**
  * Attempts to extract the file header data from a file.
  * No validation is performed; the returned result should be
  * validated separately to make sure a correct SF file was scanned.
@@ -329,7 +294,6 @@ void print_sf_file_header(struct sf_file_header header) {
 char* extract_line_from_sf_file(int file_descriptor, struct sf_file_header header, uint8_t section_number, uint64_t line_number) {
     // Read file in chunks, to minimize waiting for read();
     const static unsigned long CHUNK_SIZE = 65536; // 2^16 bytes
-    const static char LINE_SEPARATOR = 0x0a;
     
     // Store original file offset so we can restore it at the end
     int initial_offset = lseek(file_descriptor, 0, SEEK_CUR);
@@ -360,7 +324,7 @@ char* extract_line_from_sf_file(int file_descriptor, struct sf_file_header heade
         section_bytes_left -= bytes_to_read;
         
         for (long long i = bytes_to_read - 1; i >= 0; --i) { // Go backwards because sections are written in reverse
-            if (LINE_SEPARATOR == current_chunk[i]) {
+            if (OS_ASSIG_1_LINE_SEPARATOR == current_chunk[i]) {
                 current_line++;
                 if (current_line == line_number) reached_target_line = true;
                 if (current_line > line_number) break; // Target line fully read, we can stop
@@ -399,6 +363,145 @@ char* extract_line_from_sf_file(int file_descriptor, struct sf_file_header heade
     }
 }
 
+/**
+ * Tests whether a given file (specified via file name + path)
+ * is a valid SF file that has at least K sections that have
+ * exactly L lines each.
+ * @param file_name the file to be tested
+ * @param criteria a structure defining the number of sections K
+ *        and the number of lines L to be tested for
+ * @return true if the file matches, false if not
+ */
+bool test_sections_with_lines(char* file_name, struct minimum_K_sections_with_exactly_L_lines criteria) {
+    int file_descriptor = open(file_name, O_RDONLY);
+    if (-1 == file_descriptor) {
+        // File couldn't be opened, assume invalid
+        return false;
+    }
+    
+    struct sf_file_header header = extract_file_header(file_descriptor);
+    if (header.number_of_sections < criteria.sections) {
+        // File has fewer total sections than need to match
+        close(file_descriptor);
+        return false;
+    }
+    
+    if (OS_ASSIG_1_VALID_SF != validate_sf_file(header)) {
+        // It's an invalid SF file
+        close(file_descriptor);
+        return false;
+    }
+    
+    unsigned int matching_sections = 0;
+    for (int i = 0; i < header.number_of_sections; ++i) {
+        unsigned int lines_in_section = 1;
+        
+        // Read file in chunks, to minimize waiting for read();
+        const static unsigned long CHUNK_SIZE = 65536; // 2^16 bytes
+        char current_chunk[CHUNK_SIZE];
+        uint32_t section_bytes_left = header.sections[i].size;
+        
+        lseek(file_descriptor, header.sections[i].offset, SEEK_SET);
+        while (section_bytes_left > 0 && lines_in_section < criteria.lines) {
+            unsigned long bytes_to_read = (section_bytes_left > CHUNK_SIZE) ? CHUNK_SIZE : section_bytes_left;
+            read(file_descriptor, current_chunk, bytes_to_read);
+            section_bytes_left -= bytes_to_read;
+            
+            for (int j = 0; j < bytes_to_read; ++j) {
+                // Use line separator to check line count, ignore everything else
+                if (OS_ASSIG_1_LINE_SEPARATOR == current_chunk[j]) {
+                    lines_in_section++;
+                    if (lines_in_section > criteria.lines) {
+                        // Section doesn't match (too many lines), we can stop
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (lines_in_section == criteria.lines) {
+            matching_sections++;
+            if (matching_sections >= criteria.sections) {
+                // File has AT LEAST enough matching sections, can return true
+                close(file_descriptor);
+                return true;
+            }
+        }
+    }
+    
+    // If we checked all sections and didn't find enough matching ones, file doesn't match
+    close(file_descriptor);
+    return false;
+}
+
+/**
+ * Prints the full name (file name + path until there, for example
+ * "test_root/test_dir/test_file.txt") of all elements in the target
+ * directory. If the recursive flag is true, recursively prints any
+ * elements in sub-directories encountered as well.
+ *
+ * Additional filtering options are available through the filter_options
+ * argument:
+ * - if filter_options.name_ends_with is not NULL, will only display
+ *   elements whose filename ends with the given sequence
+ * - if filter_options.permissions_mask is not NULL, will only display
+ *   elemenets whose permissions (as given by stat()) match the given ones
+ * - if filter_options.min_sections_with_exact_lines has field sections
+ *   different from zero, will only display elements that are valid SF
+ *   files with at least min_sections_with_exact_lines.sections sections
+ *   having exactly min_sections_with_exact_lines.lines lines each. (e.g.
+ *   only valid SF files with at least 2 sections of exactly 13 lines)
+ * Note that if the recursive flag is true, the function will recurse into
+ * sub-directories even if they do not match the filter criteria (and hence
+ * are not printed).
+ *
+ * @param path the path to the directory where the listing starts
+ * @param recursive whether to recursively list subdirectories
+ * @param filter_options a structure defining filtering options, as explained
+ *        above
+ * @return nothing; the results are printed to STDOUT
+ */
+void print_directory_contents(char* path, bool recursive, struct directory_list_filter_options filter_options) {
+    DIR* current_directory = opendir(path);
+    
+    struct dirent* entry;
+    for (entry = readdir(current_directory); NULL != entry; entry = readdir(current_directory)) {
+        // Skip 'this directory' and 'parent directory' entries
+        if (0 == strcmp(entry->d_name, ".") || 0 == strcmp(entry->d_name, "..")) continue;
+        
+        // Generate full name for entry, including path so far
+        size_t full_name_size = strlen(path) + 1 + strlen(entry->d_name) + 1; // +1 for '/' and for '\0'
+        char* entry_full_name = (char*)malloc(full_name_size);
+        // char entry_full_name[256]; // would've worked on most systems too
+        sprintf(entry_full_name, "%s/%s", path, entry->d_name);
+        
+        // Call stat() to get entry info for recursion / filtering
+        struct stat entry_stat_buffer;
+        stat(entry_full_name, &entry_stat_buffer); // TODO: unspecified what to do if stat() returns an error
+        
+        // Extracting the conditions misses out on if shortcutting (unless optimizer kicks in),
+        // but I like the added readability.
+        bool name_ending_matches = NULL == filter_options.name_ends_with
+                                || string_ends_with(entry->d_name, filter_options.name_ends_with);
+        bool permissions_match = NULL == filter_options.permissions_rwx
+                              || test_permissions_match(&entry_stat_buffer, filter_options.permissions_rwx);
+        bool sections_with_lines_matches = 0 == filter_options.min_sections_with_exact_lines.sections
+                                       || ( S_ISREG(entry_stat_buffer.st_mode)
+                                         && test_sections_with_lines(entry_full_name, filter_options.min_sections_with_exact_lines));
+        if(name_ending_matches && permissions_match && sections_with_lines_matches) {
+            printf("%s\n", entry_full_name);
+        }
+        
+        if (recursive && S_ISDIR(entry_stat_buffer.st_mode)) {
+            print_directory_contents(entry_full_name, recursive, filter_options);
+        }
+        
+        free(entry_full_name);
+    }
+    
+    closedir(current_directory);
+}
+
 int main(int argc, char* argv[]) {
     
     if (received_option(argc, argv, "variant")) {
@@ -409,7 +512,7 @@ int main(int argc, char* argv[]) {
         
         char* path = get_parameter_value(argc, argv, "path");
         
-        struct directory_list_filter_options filter_options;
+        struct directory_list_filter_options filter_options = NO_FILTERS;
         filter_options.name_ends_with = get_parameter_value(argc, argv, "name_ends_with");
         filter_options.permissions_rwx = get_parameter_value(argc, argv, "permissions");
         // TODO: validate that permissions are formatted correctly?
@@ -457,6 +560,7 @@ int main(int argc, char* argv[]) {
                         break;
                 }
             }
+            close(file_descriptor);
         }
     }
     else if (received_option(argc, argv, "extract")) {
@@ -494,6 +598,28 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+            close(file_descriptor);
+        }
+    }
+    else if (received_option(argc, argv, "findall")) {
+        char* path = get_parameter_value(argc, argv, "path");
+        const int EXACT_LINES = 13;
+        const int MIN_NUMBER_SECTIONS_WITH_LINES = 2;
+        const bool RECURSIVE = true;
+        
+        struct directory_list_filter_options filter_options = NO_FILTERS;
+        filter_options.min_sections_with_exact_lines.sections = MIN_NUMBER_SECTIONS_WITH_LINES;
+        filter_options.min_sections_with_exact_lines.lines = EXACT_LINES;
+        
+        // Test that path is valid and points to a directory
+        struct stat target_directory_stat_buffer;
+        if (0 == stat(path, &target_directory_stat_buffer) && S_ISDIR(target_directory_stat_buffer.st_mode)) {
+            printf("SUCCESS\n");
+            print_directory_contents(path, RECURSIVE, filter_options);
+        }
+        else {
+            printf("ERROR\n");
+            printf("invalid directory path");
         }
     }
     else {
