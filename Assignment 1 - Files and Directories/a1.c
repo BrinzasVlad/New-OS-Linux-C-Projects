@@ -304,7 +304,99 @@ void print_sf_file_header(struct sf_file_header header) {
     for (int i = 0; i < header.number_of_sections; ++i) {
         printf("section%d: %s", i+1, header.sections[i].name);
         printf(" %" PRIu8 " %" PRIu32 "\n", header.sections[i].type, header.sections[i].size);
-    }        
+    }
+}
+
+/**
+ * Extracts the specified line from the specified section
+ * from a valid SF file. If the line is not found (e.g.
+ * because the section ends before reaching it), NULL
+ * will be returned.
+ * 
+ * The returned line is malloc()-allocated, and should be
+ * free()-d once done operating on.
+ *
+ * @param file_descriptor an open file descriptor corresponding
+ *        to a valid SF file
+ * @param header the header of the SF file, as returned by
+ *        extract_file_header()
+ * @param section_number the section from which to extract the
+ *        line, where first section is section number 1
+ * @param line_number the number of the line to extract, where
+ *        first line is line number 1
+ * @return a string containing the line contents, or NULL
+ */
+char* extract_line_from_sf_file(int file_descriptor, struct sf_file_header header, uint8_t section_number, uint64_t line_number) {
+    // Read file in chunks, to minimize waiting for read();
+    const static unsigned long CHUNK_SIZE = 65536; // 2^16 bytes
+    const static char LINE_SEPARATOR = 0x0a;
+    
+    // Store original file offset so we can restore it at the end
+    int initial_offset = lseek(file_descriptor, 0, SEEK_CUR);
+    
+    
+    section_number -= 1; // Working with 0-indexed sections
+    uint32_t section_bytes_left = header.sections[section_number].size;
+    uint32_t section_start = header.sections[section_number].offset + header.sections[section_number].size;
+    // Sections are written backwards, so it starts at the "end".
+    
+    uint32_t result_line_size = 100; // Start with a reasonable line size
+    char* result_line = malloc(result_line_size);
+    uint32_t result_line_write_index = 0;
+    
+    lseek(file_descriptor, section_start, SEEK_SET);
+    char current_chunk[CHUNK_SIZE];
+    unsigned int current_line = 1;
+    // If target line is line 1, we'll always find something
+    // Otherwise, it's possible it doesn't exist
+    bool reached_target_line = (line_number == 1);
+    
+    while (section_bytes_left > 0 && current_line <= line_number) {
+        // Use signed long because else `-bytes_to_read` evaluates silly and we need to cast
+        long bytes_to_read = (section_bytes_left > CHUNK_SIZE) ? CHUNK_SIZE : section_bytes_left;
+        lseek(file_descriptor, -bytes_to_read, SEEK_CUR); // Move to start of chunk
+        read(file_descriptor, current_chunk, bytes_to_read);
+        lseek(file_descriptor, -bytes_to_read, SEEK_CUR); // Counteract read() moving pointer forward
+        section_bytes_left -= bytes_to_read;
+        
+        for (long long i = bytes_to_read - 1; i >= 0; --i) { // Go backwards because sections are written in reverse
+            if (LINE_SEPARATOR == current_chunk[i]) {
+                current_line++;
+                if (current_line == line_number) reached_target_line = true;
+                if (current_line > line_number) break; // Target line fully read, we can stop
+                
+                continue; // Don't include line separator of previous line in result line
+            }
+            
+            if (current_line == line_number) {
+                // If we'd overflow the result line, reallocate it bigger
+                if (result_line_write_index >= result_line_size) {
+                    result_line_size *= 2;
+                    result_line = realloc(result_line, result_line_size);
+                    // TODO: we should maybe error-check memory allocation operations
+                }
+                
+                result_line[result_line_write_index] = current_chunk[i];
+                result_line_write_index++;
+            }
+        }
+    }
+    
+    // Restore file offset to original position, just in case
+    lseek(file_descriptor, initial_offset, SEEK_SET);
+    
+    if (reached_target_line) {
+        // Extremely unlikely, but make sure we won't overflow the line
+        if (result_line_write_index == result_line_size) {
+            result_line = realloc(result_line, result_line_size + 1);
+        }
+        result_line[result_line_write_index] = '\0'; // Add string terminator
+        return result_line;
+    }
+    else {
+        free(result_line);
+        return NULL;
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -363,6 +455,43 @@ int main(int argc, char* argv[]) {
                     case OS_ASSIG_1_WRONG_SECTION_TYPE:
                         printf("wrong sect_types");
                         break;
+                }
+            }
+        }
+    }
+    else if (received_option(argc, argv, "extract")) {
+        char* path = get_parameter_value(argc, argv, "path");
+        uint8_t section_number = (uint8_t) atoi(get_parameter_value(argc, argv, "section"));
+        uint64_t line_number = (uint64_t) atoll(get_parameter_value(argc, argv, "line"));
+        
+        int file_descriptor = open(path, O_RDONLY);
+        if (-1 == file_descriptor) {
+            printf("ERROR\n");
+            printf("invalid file");
+        }
+        else {
+            struct sf_file_header header = extract_file_header(file_descriptor);
+            if (OS_ASSIG_1_VALID_SF != validate_sf_file(header)) {
+                printf("ERROR\n");
+                printf("invalid file");
+            }
+            else {
+                if (section_number > header.number_of_sections) {
+                    printf("ERROR\n");
+                    printf("invalid section");
+                }
+                else {
+                    char* line = extract_line_from_sf_file(file_descriptor, header, section_number, line_number);
+                    
+                    if (NULL == line) {
+                        printf("ERROR\n");
+                        printf("invalid line");
+                    }
+                    else {
+                        printf("SUCCESS\n");
+                        printf("%s", line);
+                        free(line);
+                    }
                 }
             }
         }
