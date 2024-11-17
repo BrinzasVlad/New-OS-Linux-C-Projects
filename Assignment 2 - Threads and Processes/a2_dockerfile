@@ -1,0 +1,19 @@
+# Start from Python image since we need to run the tester
+FROM python
+
+# Set a workdir (optional, but nice to have)
+WORKDIR /app
+
+# Copy tester and its data
+COPY tester.py .
+COPY a2_data.json .
+
+# Copy helper library
+COPY a2_helper.c .
+COPY a2_helper.h .
+
+# Copy our code
+COPY a2.c .
+
+# Run tester
+CMD [ "python3", "./tester.py" ]
