@@ -2,6 +2,8 @@
 #include <sys/wait.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include "a2_helper.h"
 
 struct os_assig_2_thread_data {
@@ -25,6 +27,64 @@ void process_8() {
     info(END, 8, 0);
 }
 
+struct process_6_process_7_synchronization {
+    pthread_mutex_t guard;
+    pthread_cond_t process_6_thread_5_exited_cond;
+    bool process_6_thread_5_exited;
+    pthread_cond_t process_7_thread_1_exited_cond;
+    bool process_7_thread_1_exited;
+};
+
+void initialize_process_6_and_7_sync(struct process_6_process_7_synchronization* sync) {
+    pthread_mutexattr_t mutex_attributes;
+    pthread_mutexattr_init(&mutex_attributes);
+    pthread_mutexattr_setpshared(&mutex_attributes, PTHREAD_PROCESS_SHARED);
+    
+    pthread_condattr_t condition_attributes;
+    pthread_condattr_init(&condition_attributes);
+    pthread_condattr_setpshared(&condition_attributes, PTHREAD_PROCESS_SHARED);
+    
+    pthread_mutex_init(&sync->guard, &mutex_attributes);
+    pthread_cond_init(&sync->process_6_thread_5_exited_cond, &condition_attributes);
+    pthread_cond_init(&sync->process_7_thread_1_exited_cond, &condition_attributes);
+    sync->process_6_thread_5_exited = false;
+    sync->process_7_thread_1_exited = false;
+}
+
+struct process_6_process_7_synchronization* get_process_6_and_7_sync() {
+    int shared_memory_file_descriptor = shm_open("OS_ASSIG_2_P6_P7_SYNC_SHM", O_RDWR | O_CREAT | O_EXCL, 0600);
+    bool this_process_is_creator = false;
+    
+    if (shared_memory_file_descriptor > 0) {
+        // Only one process should do initialization
+        // So whichever process first manages the O_EXCL open does it
+        this_process_is_creator = true;
+        ftruncate(shared_memory_file_descriptor, sizeof(struct process_6_process_7_synchronization));
+    }
+    else {
+        shared_memory_file_descriptor = shm_open("OS_ASSIG_2_P6_P7_SYNC_SHM", O_RDWR, 0600);
+    }
+    
+    struct process_6_process_7_synchronization* sync =
+        (struct process_6_process_7_synchronization*)mmap(NULL,
+                                                          sizeof(struct process_6_process_7_synchronization),
+                                                          PROT_READ | PROT_WRITE, MAP_SHARED,
+                                                          shared_memory_file_descriptor,
+                                                          0);
+    close(shared_memory_file_descriptor);
+    
+    if (this_process_is_creator) {
+        initialize_process_6_and_7_sync(sync);
+    }
+    
+    return sync;
+}
+
+void cleanup_process_6_and_7_sync(struct process_6_process_7_synchronization* sync) {
+    munmap(sync, sizeof(struct process_6_process_7_synchronization));
+    shm_unlink("OS_ASSIG_2_P6_P7_SYNC_SHM");
+}
+
 struct process_7_synchronization {
     pthread_mutex_t guard;
     pthread_cond_t thread_5_started_cond;
@@ -33,8 +93,31 @@ struct process_7_synchronization {
     bool thread_2_exited;
 };
 
+void* process_7_thread_1(void* process_6_and_7_sync_as_void) {
+    struct process_6_process_7_synchronization* process_6_and_7_sync =
+        (struct process_6_process_7_synchronization*)process_6_and_7_sync_as_void;
+    
+    // Wait for T6.5 to end
+    pthread_mutex_lock(&process_6_and_7_sync->guard);
+        while (!process_6_and_7_sync->process_6_thread_5_exited) {
+            pthread_cond_wait(&process_6_and_7_sync->process_6_thread_5_exited_cond, &process_6_and_7_sync->guard);
+        }
+    pthread_mutex_unlock(&process_6_and_7_sync->guard);
+    
+    info(BEGIN, 7, 1);
+    
+    // Terminate and notify T6.3
+    info(END, 7, 1);
+    pthread_mutex_lock(&process_6_and_7_sync->guard);
+        process_6_and_7_sync->process_7_thread_1_exited = true;
+        pthread_cond_signal(&process_6_and_7_sync->process_7_thread_1_exited_cond);
+    pthread_mutex_unlock(&process_6_and_7_sync->guard);
+    
+    return NULL;
+}
+
 void* process_7_thread_2(void* process_7_sync_as_void) {
-    struct process_7_synchronization *process_7_sync = (struct process_7_synchronization*)process_7_sync_as_void;
+    struct process_7_synchronization* process_7_sync = (struct process_7_synchronization*)process_7_sync_as_void;
     
     // Wait for T7.5 to start
     pthread_mutex_lock(&process_7_sync->guard);
@@ -46,8 +129,8 @@ void* process_7_thread_2(void* process_7_sync_as_void) {
     info(BEGIN, 7, 2);
     
     // Terminate and notify T7.5
+    info(END, 7, 2);
     pthread_mutex_lock(&process_7_sync->guard);
-        info(END, 7, 2);
         process_7_sync->thread_2_exited = true;
         pthread_cond_signal(&process_7_sync->thread_2_exited_cond);
     pthread_mutex_unlock(&process_7_sync->guard);
@@ -59,8 +142,8 @@ void* process_7_thread_5(void* process_7_sync_as_void) {
     struct process_7_synchronization* process_7_sync = (struct process_7_synchronization*)process_7_sync_as_void;
     
     // Start and notify T7.2
+    info(BEGIN, 7, 5);
     pthread_mutex_lock(&process_7_sync->guard);
-        info(BEGIN, 7, 5);
         process_7_sync->thread_5_started = true;
         pthread_cond_signal(&process_7_sync->thread_5_started_cond);
     pthread_mutex_unlock(&process_7_sync->guard);
@@ -87,13 +170,18 @@ void process_7() {
     pthread_cond_init(&process_7_sync.thread_2_exited_cond, NULL);
     process_7_sync.thread_2_exited = false;
     
+    struct process_6_process_7_synchronization* process_6_and_7_sync = get_process_6_and_7_sync();
+    
     pthread_t threads[5];
     struct os_assig_2_thread_data thread_arguments[5];
-    // The above is a bit inefficient, since T7.2 and T7.5 don't use theirs
+    // The above is a bit inefficient, since T7.1, T7.2, and T7.5 don't use theirs
     // But the space waste is minor enough to ignore (and might be optimized out anyway)
     for (int thread_number = 1; thread_number <= 5; ++thread_number) {
         int thread_index = thread_number - 1;
         switch (thread_number) {
+            case 1:
+                pthread_create(&threads[thread_index], NULL, process_7_thread_1, process_6_and_7_sync);
+                break;
             case 2:
                 pthread_create(&threads[thread_index], NULL, process_7_thread_2, &process_7_sync);
                 break;
@@ -112,7 +200,42 @@ void process_7() {
         pthread_join(threads[i], NULL);
     }
     
+    cleanup_process_6_and_7_sync(process_6_and_7_sync);
+    
     info(END, 7, 0);
+}
+
+void* process_6_thread_3(void* process_6_and_7_sync_as_void) {
+    struct process_6_process_7_synchronization* process_6_and_7_sync =
+        (struct process_6_process_7_synchronization*)process_6_and_7_sync_as_void;
+    
+    // Wait for T7.1 to end
+    pthread_mutex_lock(&process_6_and_7_sync->guard);
+        while (!process_6_and_7_sync->process_7_thread_1_exited) {
+            pthread_cond_wait(&process_6_and_7_sync->process_7_thread_1_exited_cond, &process_6_and_7_sync->guard);
+        }
+    pthread_mutex_unlock(&process_6_and_7_sync->guard);
+    
+    info(BEGIN, 6, 3);
+    
+    info(END, 6, 3);
+    return NULL;
+}
+
+void* process_6_thread_5(void* process_6_and_7_sync_as_void) {
+    struct process_6_process_7_synchronization* process_6_and_7_sync =
+        (struct process_6_process_7_synchronization*)process_6_and_7_sync_as_void;
+    
+    info(BEGIN, 6, 5);
+    
+    // Terminate and notify T7.1
+    info(END, 6, 5);
+    pthread_mutex_lock(&process_6_and_7_sync->guard);
+        process_6_and_7_sync->process_6_thread_5_exited = true;
+        pthread_cond_signal(&process_6_and_7_sync->process_6_thread_5_exited_cond);
+    pthread_mutex_unlock(&process_6_and_7_sync->guard);
+    
+    return NULL;
 }
 
 void process_6() {
@@ -124,17 +247,31 @@ void process_6() {
         return;
     }
     
+    struct process_6_process_7_synchronization* process_6_and_7_sync = get_process_6_and_7_sync();
+    
     pthread_t thread_ids[6];
     struct os_assig_2_thread_data thread_arguments[6];
-    for (int i = 0; i < 6; ++i) {
-        thread_arguments[i].process_id = 6;
-        thread_arguments[i].thread_id = i + 1;
-        pthread_create(&thread_ids[i], NULL, generic_thread, &thread_arguments[i]);
+    for (int thread_number = 1; thread_number <= 6; ++thread_number) {
+        int thread_index = thread_number - 1;
+        switch (thread_number) {
+            case 3:
+                pthread_create(&thread_ids[thread_index], NULL, process_6_thread_3, process_6_and_7_sync);
+                break;
+            case 5:
+                pthread_create(&thread_ids[thread_index], NULL, process_6_thread_5, process_6_and_7_sync);
+                break;
+            default:
+                thread_arguments[thread_index].process_id = 6;
+                thread_arguments[thread_index].thread_id = thread_number;
+                pthread_create(&thread_ids[thread_index], NULL, generic_thread, &thread_arguments[thread_index]);
+        }
     }
     
     for (int i = 0; i < 6; ++i) {
         pthread_join(thread_ids[i], NULL);
     }
+    
+    cleanup_process_6_and_7_sync(process_6_and_7_sync);
     
     waitpid(process_8_pid, NULL, 0);
     info(END, 6, 0);
