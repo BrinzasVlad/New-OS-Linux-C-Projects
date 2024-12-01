@@ -16,6 +16,8 @@ void* generic_thread(void* thread_info_as_void) {
     
     info(BEGIN, data.process_id, data.thread_id);
     
+    // do_work();
+    
     info(END, data.process_id, data.thread_id);
     
     return NULL;
@@ -93,6 +95,14 @@ struct process_7_synchronization {
     bool thread_2_exited;
 };
 
+void initialize_process_7_sync(struct process_7_synchronization* sync) {
+    pthread_mutex_init(&sync->guard, NULL);
+    pthread_cond_init(&sync->thread_5_started_cond, NULL);
+    sync->thread_5_started = false;
+    pthread_cond_init(&sync->thread_2_exited_cond, NULL);
+    sync->thread_2_exited = false;
+}
+
 void* process_7_thread_1(void* process_6_and_7_sync_as_void) {
     struct process_6_process_7_synchronization* process_6_and_7_sync =
         (struct process_6_process_7_synchronization*)process_6_and_7_sync_as_void;
@@ -105,6 +115,8 @@ void* process_7_thread_1(void* process_6_and_7_sync_as_void) {
     pthread_mutex_unlock(&process_6_and_7_sync->guard);
     
     info(BEGIN, 7, 1);
+    
+    // do_work();
     
     // Terminate and notify T6.3
     info(END, 7, 1);
@@ -128,6 +140,8 @@ void* process_7_thread_2(void* process_7_sync_as_void) {
     
     info(BEGIN, 7, 2);
     
+    // do_work();
+    
     // Terminate and notify T7.5
     info(END, 7, 2);
     pthread_mutex_lock(&process_7_sync->guard);
@@ -148,6 +162,8 @@ void* process_7_thread_5(void* process_7_sync_as_void) {
         pthread_cond_signal(&process_7_sync->thread_5_started_cond);
     pthread_mutex_unlock(&process_7_sync->guard);
     
+    // do_work();
+    
     // Wait for T7.2 to end
     pthread_mutex_lock(&process_7_sync->guard);
         while (!process_7_sync->thread_2_exited) {
@@ -164,11 +180,7 @@ void process_7() {
     info(BEGIN, 7, 0);
     
     struct process_7_synchronization process_7_sync;
-    pthread_mutex_init(&process_7_sync.guard, NULL);
-    pthread_cond_init(&process_7_sync.thread_5_started_cond, NULL);
-    process_7_sync.thread_5_started = false;
-    pthread_cond_init(&process_7_sync.thread_2_exited_cond, NULL);
-    process_7_sync.thread_2_exited = false;
+    initialize_process_7_sync(&process_7_sync);
     
     struct process_6_process_7_synchronization* process_6_and_7_sync = get_process_6_and_7_sync();
     
@@ -218,6 +230,8 @@ void* process_6_thread_3(void* process_6_and_7_sync_as_void) {
     
     info(BEGIN, 6, 3);
     
+    // do_work();
+    
     info(END, 6, 3);
     return NULL;
 }
@@ -227,6 +241,8 @@ void* process_6_thread_5(void* process_6_and_7_sync_as_void) {
         (struct process_6_process_7_synchronization*)process_6_and_7_sync_as_void;
     
     info(BEGIN, 6, 5);
+    
+    // do_work();
     
     // Terminate and notify T7.1
     info(END, 6, 5);
@@ -284,7 +300,8 @@ void process_5() {
 }
 
 struct process_4_synchronization {
-    pthread_mutex_t guard;
+    pthread_mutex_t outside_info_guard;
+    pthread_mutex_t within_info_guard;
     pthread_cond_t thread_count_increased_cond;
     pthread_cond_t more_threads_may_enter_cond;
     pthread_cond_t thread_11_exited_cond;
@@ -299,56 +316,57 @@ struct process_4_thread_args {
     struct process_4_synchronization* sync;
 };
 
+void initialize_process_4_sync(struct process_4_synchronization* sync) {
+    pthread_mutex_init(&sync->outside_info_guard, NULL);
+    pthread_mutex_init(&sync->within_info_guard, NULL);
+    pthread_cond_init(&sync->thread_count_increased_cond, NULL);
+    pthread_cond_init(&sync->more_threads_may_enter_cond, NULL);
+    pthread_cond_init(&sync->thread_11_exited_cond, NULL);
+    sync->running_threads_without_info_count = 0;
+    sync->running_threads_with_info_count = 0;
+    sync->MAX_THREAD_COUNT = 6;
+    sync->number_of_threads_that_may_still_terminate = 35 - 6; // Total threads minus minimum threads needed for T4.11
+}
+
 void* process_4_generic_thread(void* process_4_thread_args_as_void) {
     int thread_id = ((struct process_4_thread_args*) process_4_thread_args_as_void)->thread_id;
     struct process_4_synchronization* sync = ((struct process_4_thread_args*) process_4_thread_args_as_void)->sync;
     
-    // Hack: normally, we'd just have the info() function, which should be lightweight,
-    // inside the mutex lock region. However, in this assignment the info() function is
-    // expensive (simulated via usleep()), and hence should really really be run in a
-    // parallel manner. To get this, we actually keep TWO counts: one of threads running
-    // pre-info (so we never have more than MAX_THREAD_COUNT of these), and one of threads
-    // running post-info (which is the count we use for T4.11's condition)
-    
     // Wait until there are less than MAX_THREAD_COUNT threads running (regardless of info() calls) to start
-    pthread_mutex_lock(&sync->guard);
+    pthread_mutex_lock(&sync->outside_info_guard);
         while (sync->running_threads_without_info_count >= sync->MAX_THREAD_COUNT) {
-            pthread_cond_wait(&sync->more_threads_may_enter_cond, &sync->guard);
+            pthread_cond_wait(&sync->more_threads_may_enter_cond, &sync->outside_info_guard);
         }
         sync->running_threads_without_info_count++;
-    pthread_mutex_unlock(&sync->guard);
+    pthread_mutex_unlock(&sync->outside_info_guard);
     
-    info(BEGIN, 4, thread_id);
+    info(BEGIN, 4, thread_id); // Expensive, must keep outside mutex lock blocks
     
     // Only signal T4.11 AFTER info() has been completed
-    pthread_mutex_lock(&sync->guard);
+    pthread_mutex_lock(&sync->within_info_guard);
         sync->running_threads_with_info_count++;
         pthread_cond_signal(&sync->thread_count_increased_cond);
-    pthread_mutex_unlock(&sync->guard);
+    pthread_mutex_unlock(&sync->within_info_guard);
     
-    // Hack: normally, we'd just have the info() function, which should be lightweight,
-    // inside the mutex lock region. However, in this assignment the info() function is
-    // expensive (simulated via usleep()), and hence should really really be run in a
-    // parallel manner. To get this, we first check whether the thread may terminate
-    // without blocking T4.11 permanently, making sure to note internally that the
-    // thread is no longer really running, then info(), and only then make room for
-    // more new threads to enter.
+    
+    // do_work();
+    
     
     // Make sure there are enough threads left so T4.11 can terminate
-    pthread_mutex_lock(&sync->guard);
+    pthread_mutex_lock(&sync->within_info_guard);
         while (sync->number_of_threads_that_may_still_terminate == 0) {
-            pthread_cond_wait(&sync->thread_11_exited_cond, &sync->guard);
+            pthread_cond_wait(&sync->thread_11_exited_cond, &sync->within_info_guard);
         }
         sync->number_of_threads_that_may_still_terminate--;
         sync->running_threads_with_info_count--;
-    pthread_mutex_unlock(&sync->guard);
+    pthread_mutex_unlock(&sync->within_info_guard);
     
-    info(END, 4, thread_id);
+    info(END, 4, thread_id); // Expensive, must keep outside mutex lock blocks
     
-    pthread_mutex_lock(&sync->guard);
+    pthread_mutex_lock(&sync->outside_info_guard);
         sync->running_threads_without_info_count--;
         pthread_cond_signal(&sync->more_threads_may_enter_cond);
-    pthread_mutex_unlock(&sync->guard);
+    pthread_mutex_unlock(&sync->outside_info_guard);
     
     return NULL;
 }
@@ -357,33 +375,37 @@ void* process_4_thread_11(void* process_4_sync_as_void) {
     struct process_4_synchronization* sync = (struct process_4_synchronization*) process_4_sync_as_void;
     
     // Wait until there are less than MAX_THREAD_COUNT threads running properly (post info() call)
-    pthread_mutex_lock(&sync->guard);
+    pthread_mutex_lock(&sync->outside_info_guard);
         while (sync->running_threads_without_info_count >= sync->MAX_THREAD_COUNT) {
-            pthread_cond_wait(&sync->more_threads_may_enter_cond, &sync->guard);
+            pthread_cond_wait(&sync->more_threads_may_enter_cond, &sync->outside_info_guard);
         }
         sync->running_threads_without_info_count++;
-    pthread_mutex_unlock(&sync->guard);
+    pthread_mutex_unlock(&sync->outside_info_guard);
     
     // This fits best in the locked region, but can safely exist outside of it
     // to accomodate info() being an expensive function
     info(BEGIN, 4, 11);
     
-    pthread_mutex_lock(&sync->guard);
+    pthread_mutex_lock(&sync->within_info_guard);
         sync->running_threads_with_info_count++;
-    pthread_mutex_unlock(&sync->guard);
+    pthread_mutex_unlock(&sync->within_info_guard);
+    
+    // do_work();
     
     // Wait until there are exactly 6 threads running properly (after info(BEGIN), before info(END))
-    pthread_mutex_lock(&sync->guard);
+    pthread_mutex_lock(&sync->within_info_guard);
         while (sync->running_threads_with_info_count < 6) {
-            pthread_cond_wait(&sync->thread_count_increased_cond, &sync->guard);
+            pthread_cond_wait(&sync->thread_count_increased_cond, &sync->within_info_guard);
         }
         info(END, 4, 11);
         sync->running_threads_with_info_count--;
-        sync->running_threads_without_info_count--;
+        pthread_mutex_lock(&sync->outside_info_guard);
+            sync->running_threads_without_info_count--;
+        pthread_mutex_unlock(&sync->outside_info_guard);
         sync->number_of_threads_that_may_still_terminate += 5; // Allow the last threads to exit since T4.11 can't get stuck anymore
         pthread_cond_broadcast(&sync->thread_11_exited_cond);
         pthread_cond_broadcast(&sync->more_threads_may_enter_cond); // 5 signal()s would be more precise, technically
-    pthread_mutex_unlock(&sync->guard);
+    pthread_mutex_unlock(&sync->within_info_guard);
     
     return NULL;
 }
@@ -398,14 +420,7 @@ void process_4() {
     }
     
     struct process_4_synchronization sync;
-    pthread_mutex_init(&sync.guard, NULL);
-    pthread_cond_init(&sync.thread_count_increased_cond, NULL);
-    pthread_cond_init(&sync.more_threads_may_enter_cond, NULL);
-    pthread_cond_init(&sync.thread_11_exited_cond, NULL);
-    sync.running_threads_without_info_count = 0;
-    sync.running_threads_with_info_count = 0;
-    sync.MAX_THREAD_COUNT = 6;
-    sync.number_of_threads_that_may_still_terminate = 35 - 6; // Total threads minus minimum threads needed for T4.11
+    initialize_process_4_sync(&sync);
     
     pthread_t threads[35];
     struct process_4_thread_args thread_arguments[35];
