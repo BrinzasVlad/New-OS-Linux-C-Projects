@@ -399,13 +399,14 @@ void* process_4_thread_11(void* process_4_sync_as_void) {
         }
         info(END, 4, 11);
         sync->running_threads_with_info_count--;
-        pthread_mutex_lock(&sync->outside_info_guard);
-            sync->running_threads_without_info_count--;
-        pthread_mutex_unlock(&sync->outside_info_guard);
         sync->number_of_threads_that_may_still_terminate += 5; // Allow the last threads to exit since T4.11 can't get stuck anymore
         pthread_cond_broadcast(&sync->thread_11_exited_cond);
-        pthread_cond_broadcast(&sync->more_threads_may_enter_cond); // 5 signal()s would be more precise, technically
     pthread_mutex_unlock(&sync->within_info_guard);
+    
+    pthread_mutex_lock(&sync->outside_info_guard);
+        sync->running_threads_without_info_count--;
+        pthread_cond_broadcast(&sync->more_threads_may_enter_cond); // 5 signal()s would be more precise, technically
+    pthread_mutex_unlock(&sync->outside_info_guard);
     
     return NULL;
 }
