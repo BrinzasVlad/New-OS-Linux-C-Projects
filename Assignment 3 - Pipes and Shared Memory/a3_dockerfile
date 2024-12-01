@@ -1,0 +1,19 @@
+# Start from Python image since we need to run the tester
+FROM python
+
+# Install strace because tester needs it (odd that it only breaks on Assignment 3)
+RUN apt-get update
+RUN apt-get install -y strace
+
+# Set a workdir (optional, but nice to have)
+WORKDIR /app
+
+# Copy tester and its data
+COPY tester.py .
+COPY a3_data.json .
+
+# Copy our code
+COPY a3.c .
+
+# Run tester
+CMD [ "python3", "./tester.py" ]
