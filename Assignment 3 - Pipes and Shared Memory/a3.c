@@ -108,6 +108,53 @@ void cleanup_shared_memory(char* memory_mapped_shared_memory, const char* shared
     }
 }
 
+struct mapped_file {
+    char* at; // Pointer used for accessing the actual memory-mapped file, like file.at[index]
+    unsigned int size;
+};
+
+struct mapped_file setup_mapped_file(const char* file_path) {
+    char* mapped_file_pointer = NULL;
+    unsigned int mapped_file_size = 0;
+    
+    int file_descriptor = open(file_path, O_RDWR);
+    if (-1 != file_descriptor) {
+        struct stat stat_info;
+        fstat(file_descriptor, &stat_info);
+        
+        mapped_file_size = stat_info.st_size;
+        
+        mapped_file_pointer = (char*)mmap(NULL,
+                                          mapped_file_size,
+                                          PROT_READ,
+                                          MAP_PRIVATE,
+                                          file_descriptor,
+                                          0);
+        
+        if (MAP_FAILED == mapped_file_pointer) {
+            // Set values back to default to indicate failure
+            mapped_file_pointer = NULL;
+            mapped_file_size = 0;
+        }
+        
+        close(file_descriptor);
+    }
+    
+    struct mapped_file structure_to_return;
+    structure_to_return.at = mapped_file_pointer;
+    structure_to_return.size = mapped_file_size;
+    
+    return structure_to_return;
+}
+
+void cleanup_mapped_file(struct mapped_file* memory_mapped_file) {
+    if (NULL != memory_mapped_file->at) {
+        munmap(memory_mapped_file->at, memory_mapped_file->size);
+        memory_mapped_file->at = NULL;
+        memory_mapped_file->size = 0;
+    }
+}
+
 int main() {
     int request_pipe_in, response_pipe_out;
     setup_pipes(&request_pipe_in, &response_pipe_out);
@@ -115,7 +162,7 @@ int main() {
     const char SHARED_MEMORY_NAME[] = "/RmFxwC4";
     char* shared_memory_region = NULL;
     unsigned int shared_memory_size = 0;
-    // char* memory_mapped_file = NULL;
+    struct mapped_file memory_mapped_file = { NULL, 0 };
     
     char command[OS_ASSIG_3_MAXIMUM_STRING_MESSAGE_LENGTH + 1];
     while (1) {
@@ -123,6 +170,7 @@ int main() {
         
         if (0 == strcmp(command, "EXIT")) {
             cleanup_shared_memory(shared_memory_region, SHARED_MEMORY_NAME, shared_memory_size);
+            cleanup_mapped_file(&memory_mapped_file);
             cleanup_pipes(&request_pipe_in, &response_pipe_out);
             break;
         }
@@ -157,6 +205,16 @@ int main() {
                     *(unsigned int*)(shared_memory_region + offset) = value;
                     write_string_on_pipe(response_pipe_out, "SUCCESS");
                 }
+            }
+            
+            if (0 == strcmp(command, "MAP_FILE")) {
+                char file_name[OS_ASSIG_3_MAXIMUM_STRING_MESSAGE_LENGTH + 1];
+                read_string_from_pipe(request_pipe_in, file_name);
+                
+                memory_mapped_file = setup_mapped_file(file_name);
+                
+                if (NULL == memory_mapped_file.at) write_string_on_pipe(response_pipe_out, "ERROR");
+                else write_string_on_pipe(response_pipe_out, "SUCCESS");
             }
         }
     }
