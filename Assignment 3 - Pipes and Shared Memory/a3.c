@@ -216,6 +216,21 @@ int main() {
                 if (NULL == memory_mapped_file.at) write_string_on_pipe(response_pipe_out, "ERROR");
                 else write_string_on_pipe(response_pipe_out, "SUCCESS");
             }
+            
+            if (0 == strcmp(command, "READ_FROM_FILE_OFFSET")) {
+                unsigned int offset = read_number_from_pipe(request_pipe_in);
+                unsigned int number_of_bytes = read_number_from_pipe(request_pipe_in);
+                
+                if (shared_memory_region != NULL 
+                    && memory_mapped_file.at != NULL
+                    && offset + number_of_bytes <= memory_mapped_file.size
+                    && number_of_bytes <= shared_memory_size) {
+                    
+                    memcpy(shared_memory_region, memory_mapped_file.at + offset, number_of_bytes);
+                    write_string_on_pipe(response_pipe_out, "SUCCESS");
+                }
+                else write_string_on_pipe(response_pipe_out, "ERROR");
+            }
         }
     }
     
