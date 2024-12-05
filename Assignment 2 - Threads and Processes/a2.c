@@ -70,7 +70,8 @@ struct process_6_process_7_synchronization* get_process_6_and_7_sync() {
     struct process_6_process_7_synchronization* sync =
         (struct process_6_process_7_synchronization*)mmap(NULL,
                                                           sizeof(struct process_6_process_7_synchronization),
-                                                          PROT_READ | PROT_WRITE, MAP_SHARED,
+                                                          PROT_READ | PROT_WRITE,
+                                                          MAP_SHARED,
                                                           shared_memory_file_descriptor,
                                                           0);
     close(shared_memory_file_descriptor);
