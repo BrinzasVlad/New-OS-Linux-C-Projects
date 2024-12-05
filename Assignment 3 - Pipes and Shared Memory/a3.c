@@ -84,7 +84,7 @@ char* setup_shared_memory(const char* shared_memory_name, unsigned int shared_me
             memory_mapped_shared_memory = (char*)mmap(NULL,
                                                       shared_memory_size,
                                                       PROT_READ | PROT_WRITE,
-                                                      MAP_PRIVATE,
+                                                      MAP_SHARED,
                                                       shared_memory_file_descriptor,
                                                       0);
             
@@ -139,8 +139,24 @@ int main() {
                 shared_memory_size = read_number_from_pipe(request_pipe_in);
                 shared_memory_region = setup_shared_memory(SHARED_MEMORY_NAME, shared_memory_size);
                 
-                if (NULL == shared_memory_region) write_string_on_pipe(response_pipe_out, "ERROR");
+                if (NULL == shared_memory_region) {
+                    write_string_on_pipe(response_pipe_out, "ERROR");
+                    shared_memory_size = 0;
+                }
                 else write_string_on_pipe(response_pipe_out, "SUCCESS");
+            }
+            
+            if (0 == strcmp(command, "WRITE_TO_SHM")) {
+                unsigned int offset = read_number_from_pipe(request_pipe_in);
+                unsigned int value = read_number_from_pipe(request_pipe_in);
+                
+                if (offset + sizeof(unsigned int) > shared_memory_size){
+                    write_string_on_pipe(response_pipe_out, "ERROR");
+                }
+                else {
+                    *(unsigned int*)(shared_memory_region + offset) = value;
+                    write_string_on_pipe(response_pipe_out, "SUCCESS");
+                }
             }
         }
     }
