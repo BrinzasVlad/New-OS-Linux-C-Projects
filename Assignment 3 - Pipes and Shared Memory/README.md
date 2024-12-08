@@ -3,7 +3,8 @@ This folder contains the task requirements, tester, and solution code for the th
 
 ## Task Requirements
 The complete task requirements are specified in a3_en.pdf.\
-In summary, the task is to write a program that communicates with the tester via named pipe and performs a series of operations such as managing shared memory, memory-mapping files, or reading specific segmens of a file into shared memory.
+In summary, the task is to write a program that communicates with the tester via named pipe and performs a series of operations such as managing shared memory, memory-mapping files, or reading specific segmens of a file into shared memory.\
+There are also some tasks involving SF files where it would have been cleaner to set up a shared library of functions with Assignment 1, but given that the tester wants to compile the code itself, adding additional files becomes more complicated.
 
 ## Running in Docker
 In order to see the tester run in a Docker container, first build an image with

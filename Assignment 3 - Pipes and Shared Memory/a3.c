@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <inttypes.h>
 
 
 #define OS_ASSIG_3_MAXIMUM_STRING_MESSAGE_LENGTH 250
@@ -41,6 +42,117 @@ unsigned int read_number_from_pipe(int pipe_file_descriptor) {
     
     return number_read;
 }
+
+//---------------------------------------------------------------------------------
+// SF file code that should've been shared with Assignment 1 rather than duplicated
+#define OS_ASSIG_1_MAGIC_SIZE 4
+#define OS_ASSIG_1_SECTION_NAME_SIZE 15
+
+#define OS_ASSIG_1_VALID_SF 1
+#define OS_ASSIG_1_WRONG_MAGIC 2
+#define OS_ASSIG_1_WRONG_VERSION 3
+#define OS_ASSIG_1_WRONG_NUMBER_OF_SECTIONS 4
+#define OS_ASSIG_1_WRONG_SECTION_TYPE 5
+
+struct sf_section_header {
+    char name[OS_ASSIG_1_SECTION_NAME_SIZE + 1];
+    uint8_t type;
+    uint32_t offset;
+    uint32_t size;
+};
+
+struct sf_file_header {
+    char magic[OS_ASSIG_1_MAGIC_SIZE + 1];
+    uint16_t header_size;
+    uint32_t version;
+    uint8_t number_of_sections;
+    struct sf_section_header sections[255];
+    // We could also use a pointer, then allocate via malloc().
+    // But since that would require usage of free() and section
+    // headers are small, and there can be at most 255 sections
+    // (maximum value for a uint8_t), and we're unlikely to have
+    // more than one header at a time (never, in the current form
+    // of this assignment), and 255 x 28 = 7140 bytes (~7 kB), I
+    // chose this instead.
+};
+
+/**
+ * Attempts to extract the file header data from a file.
+ * No validation is performed; the returned result should be
+ * validated separately to make sure a correct SF file was scanned.
+ *
+ * If the file is too short to read a complete header from, this
+ * function will fill in as much data as available, and the rest will
+ * be returned initialized to 0 (for numerical fields) or "" (for
+ * string fields).
+ *
+ * @param memory_mapped_sf_file a pointer to the memory-mapped contents of the file
+ * @return an sf_file_header structure containing the header data
+ */
+struct sf_file_header extract_file_header(char* memory_mapped_sf_file) {
+    struct sf_file_header header; // Structs are 0-initialized by default
+    unsigned int index_in_file = 0;
+    
+    memcpy(header.magic, memory_mapped_sf_file + index_in_file, OS_ASSIG_1_MAGIC_SIZE);
+    header.magic[OS_ASSIG_1_MAGIC_SIZE] = '\0'; // Add terminator, since read() does not
+    index_in_file += OS_ASSIG_1_MAGIC_SIZE;
+    
+    memcpy(&header.header_size, memory_mapped_sf_file + index_in_file, sizeof(header.header_size));
+    index_in_file += sizeof(header.header_size);
+    
+    memcpy(&header.version, memory_mapped_sf_file + index_in_file, sizeof(header.version));
+    index_in_file += sizeof(header.version);
+    
+    memcpy(&header.number_of_sections, memory_mapped_sf_file + index_in_file, sizeof(header.number_of_sections));
+    index_in_file += sizeof(header.number_of_sections);
+    
+    for (int section_number = 0; section_number < header.number_of_sections; ++section_number) {
+        memcpy(header.sections[section_number].name, memory_mapped_sf_file + index_in_file, OS_ASSIG_1_SECTION_NAME_SIZE);
+        header.sections[section_number].name[OS_ASSIG_1_SECTION_NAME_SIZE] = '\0'; // Add terminator since read() does not
+        index_in_file += OS_ASSIG_1_SECTION_NAME_SIZE;
+        
+        memcpy(&header.sections[section_number].type, memory_mapped_sf_file + index_in_file, sizeof(header.sections[section_number].type));
+        index_in_file += sizeof(header.sections[section_number].type);
+        
+        memcpy(&header.sections[section_number].offset, memory_mapped_sf_file + index_in_file, sizeof(header.sections[section_number].offset));
+        index_in_file += sizeof(header.sections[section_number].offset);
+        
+        memcpy(&header.sections[section_number].size, memory_mapped_sf_file + index_in_file, sizeof(header.sections[section_number].size));
+        index_in_file += sizeof(header.sections[section_number].size);
+    }
+    
+    return header;
+}
+
+/**
+ * Validates a given SF file using its header.
+ * Returns one of the following codes, depending on the result:
+ * - OS_ASSIG_1_VALID_SF if file is valid
+ * - OS_ASSIG_1_WRONG_MAGIC if magic is invalid
+ * - OS_ASSIG_1_WRONG_VERSION is version is invalid
+ * - OS_ASSIG_1_WRONG_NUMBER_OF_SECTIONS if number of sections is invalid
+ * - OS_ASSIG_1_WRONG_SECTION_TYPE if a section has an invalid type
+ *
+ * @param header an sf_file_header structure, as returned by extract_file_header()
+ * @return a code as specified above
+ */
+int validate_sf_file(struct sf_file_header header) {
+    if (0 != strcmp("9Q6d", header.magic)) return OS_ASSIG_1_WRONG_MAGIC;
+    if (header.version < 107 || header.version > 144) return OS_ASSIG_1_WRONG_VERSION;
+    if (header.number_of_sections != 2 &&
+        (header.number_of_sections < 5 || header.number_of_sections > 17)) return OS_ASSIG_1_WRONG_NUMBER_OF_SECTIONS;
+    
+    for (int i = 0; i < header.number_of_sections; ++i) {
+        if(header.sections[i].type != 33 &&
+           header.sections[i].type != 28 &&
+           header.sections[i].type != 38 &&
+           header.sections[i].type != 54) return OS_ASSIG_1_WRONG_SECTION_TYPE;
+    }
+    
+    return OS_ASSIG_1_VALID_SF;
+}
+// SF file code that should've been shared with Assignment 1 rather than duplicated
+//---------------------------------------------------------------------------------
 
 void setup_pipes(int* request_pipe_in_file_descriptor, int* response_pipe_out_file_descriptor) {
     if (0 != mkfifo("RESP_PIPE_10521", 0600)) {
@@ -231,6 +343,36 @@ int main() {
                 }
                 else write_string_on_pipe(response_pipe_out, "ERROR");
             }
+            
+            if (0 == strcmp(command, "READ_FROM_FILE_SECTION")) {
+                unsigned int section_number = read_number_from_pipe(request_pipe_in);
+                unsigned int offset = read_number_from_pipe(request_pipe_in);
+                unsigned int number_of_bytes = read_number_from_pipe(request_pipe_in);
+                
+                if (NULL == shared_memory_region || NULL == memory_mapped_file.at) {
+                    write_string_on_pipe(response_pipe_out, "ERROR");
+                }
+                else {
+                    struct sf_file_header header = extract_file_header(memory_mapped_file.at);
+                    if (OS_ASSIG_1_VALID_SF != validate_sf_file(header) || section_number > header.number_of_sections) {
+                        write_string_on_pipe(response_pipe_out, "ERROR");
+                    }
+                    else {
+                        struct sf_section_header section_header = header.sections[section_number - 1]; // Adjust for 0-indexing!
+                        if (offset + number_of_bytes > section_header.size
+                            || section_header.offset + section_header.size > memory_mapped_file.size) {
+                            
+                            write_string_on_pipe(response_pipe_out, "ERROR");
+                        }
+                        else {
+                            unsigned int final_offset = section_header.offset + offset;                            
+                            memcpy(shared_memory_region, memory_mapped_file.at + final_offset, number_of_bytes);
+                            write_string_on_pipe(response_pipe_out, "SUCCESS");
+                        }
+                    }
+                }
+            }
+            
         }
     }
     
